@@ -1,69 +1,91 @@
 package de.SRH.stadtradeln.thread;
 
+import de.SRH.stadtradeln.model.DateiManager;
 import de.SRH.stadtradeln.model.StadtradelnModel;
+import de.SRH.stadtradeln.view.StadtradelnView;
 
-import java.io.File;
-import java.util.List;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
 
+
+ // Ein Thread, der jede Minute prüft, ob eine Datei "neuefahrten.csv" existiert und diese verarbeitet.
 public class VerarbeitungThread extends Thread {
-    private static final Logger logger = Logger.getLogger(VerarbeitungThread.class.getName());
+    private static final Path NEUE_FAHRTEN_DATEI = Paths.get("neuefahrten.csv");
     private final StadtradelnModel model;
-    private final String neueFahrtenPfad = "C:\\Users\\startklar\\IdeaProjects\\Stadtradeln\\src\\de\\SRH\\stadtradeln\\neuefahrten.csv";
+    private final StadtradelnView view;
+    private boolean running = true;
 
-    public VerarbeitungThread(StadtradelnModel model) {
+    public VerarbeitungThread(StadtradelnModel model, DateiManager dateiManager, StadtradelnView view) {
         this.model = model;
+        this.view = view;
     }
 
     @Override
     public void run() {
-        logger.info("VerarbeitungThread gestartet."); // Log-Nachricht: Thread gestartet
-        // Solange der Thread nicht unterbrochen wird, läuft die Schleife weiter
-        while (!Thread.currentThread().isInterrupted()) {
+        while (running) {
             try {
-                verarbeiteNeueFahrten(); // Verarbeitet neue Fahrten aus der Datei
-                Thread.sleep(60000); // Thread pausiert für 60 Sekunden
+                if (Files.exists(NEUE_FAHRTEN_DATEI)) {
+                    verarbeiteNeueFahrten();
+                }
+                Thread.sleep(60000); // 1 Minute warten
             } catch (InterruptedException e) {
-                // Wenn der Thread unterbrochen wird, wird die Unterbrechung als Warnung geloggt und der Interrupt-Status wird wieder gesetzt
-                logger.log(Level.WARNING, "Thread wurde unterbrochen.", e);
-                Thread.currentThread().interrupt(); // Status wiederherstellen
-                break; // Schleife wird beendet
-            } catch (Exception e) {
-                // Bei unerwarteten Fehlern wird der Fehler mit hoher Priorität geloggt
-                logger.log(Level.SEVERE, "Unerwarteter Fehler im VerarbeitungThread.", e);
+                System.err.println("Thread wurde unterbrochen.");
+                running = false;
             }
         }
-        logger.info("VerarbeitungThread wurde sauber beendet."); // Log-Nachricht: Der Thread wurde sauber beendet
     }
 
     private void verarbeiteNeueFahrten() {
-        File file = new File(neueFahrtenPfad);
-        if (!file.exists()) {  // Prüft, ob die Datei existiert. Andernfalls wird ein Warn-Log ausgegeben und die Methode beendet
-            logger.warning("Datei neuefahrten.csv existiert nicht.");
-            return;
-        }
+        List<String> fehlerhafteZeilen = new ArrayList<>();
+        List<String> gueltigeZeilen = new ArrayList<>();
 
-        try {
-            List<String[]> neueFahrten = model.ladeFahrten(); // Lädt die Fahrten aus der Datei in eine Liste von String-Arrays
-            neueFahrten.forEach(fahrt -> { // Iteriert durch jede Fahrt in der Liste
-                try {
-                    String nickname = fahrt[0]; // Extrahiert Nickname aus der Zeile
-                    int kilometer = Integer.parseInt(fahrt[1]); // Extrahiert Kilometer aus der Zeile
-                    model.addFahrt(nickname, kilometer); // Fügt die Fahrt dem Modell hinzu
-                    logger.info("Fahrt hinzugefügt: " + nickname + ", " + kilometer + " km"); // Loggt das erfolgreiche Hinzufügen der Fahrt
-                } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-                    logger.log(Level.WARNING, "Fehlerhafte Daten in der Datei: " + String.join(",", fahrt), e); // Loggt einen Warnhinweis bei fehlerhaften Daten
+        try (BufferedReader reader = Files.newBufferedReader(NEUE_FAHRTEN_DATEI)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] teile = line.split(",");
+                if (teile.length != 2) {
+                    fehlerhafteZeilen.add(line);
+                    continue;
                 }
-            });
-        } catch (Exception e) {
-            logger.log(Level.SEVERE, "Fehler beim Verarbeiten der Datei neuefahrten.csv.", e); // Loggt schwerwiegende Fehler, die beim Laden oder Verarbeiten der Datei auftreten
+
+                String nickname = teile[0].trim();
+                int kilometer;
+
+                try {
+                    kilometer = Integer.parseInt(teile[1].trim());
+                    if (kilometer < 0) {
+                        throw new IllegalArgumentException("Kilometeranzahl darf nicht negativ sein.");
+                    }
+                    model.addFahrt(nickname, kilometer);
+                    gueltigeZeilen.add(line);
+                } catch (IllegalArgumentException e) {
+                    fehlerhafteZeilen.add(line);
+                }
+            }
+        } catch (IOException e) {
+            view.addFeedbackMessage("Fehler beim Lesen der Datei: " + e.getMessage());
         }
 
-        if (file.delete()) {
-            logger.info("Datei neuefahrten.csv wurde erfolgreich gelöscht."); // Erfolgreiches Löschen wird geloggt
+        // Falls keine fehlerhaften Daten vorhanden sind, Datei löschen
+        if (fehlerhafteZeilen.isEmpty()) {
+            try {
+                Files.delete(NEUE_FAHRTEN_DATEI);
+                view.addFeedbackMessage("Datei 'neuefahrten.csv' erfolgreich verarbeitet und gelöscht.");
+            } catch (IOException e) {
+                view.addFeedbackMessage("Fehler beim Löschen der Datei: " + e.getMessage());
+            }
         } else {
-            logger.warning("Datei neuefahrten.csv konnte nicht gelöscht werden."); // Falls die Datei nicht gelöscht werden konnte, wird ein Warnhinweis geloggt
+            view.addFeedbackMessage("Fehlerhafte Zeilen in 'neuefahrten.csv' gefunden. Datei bleibt erhalten.");
         }
+
+        // GUI aktualisieren
+        view.updateTable(model.getGruppenKilometer());
+        model.speichereDaten();
+    }
+
+    public void stopThread() {
+        running = false;
+        this.interrupt();
     }
 }
